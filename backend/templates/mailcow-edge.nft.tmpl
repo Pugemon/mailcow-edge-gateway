@@ -1,0 +1,43 @@
+#!/usr/sbin/nft -f
+# /etc/mailcow-edge.nft — периметр mailcow на бэкенде.
+# Файл создаётся backend/install.sh из backend/templates/mailcow-edge.nft.tmpl; загружается
+# mailcow-edge.service. Отдельная таблица: перестройка цепочек Docker её не трогает.
+#
+# Защита от трафика из оверлея живёт в prerouting, а не в input/forward: клиенты mesh-VPN могут
+# вставлять "iifname <оверлей> accept" в начало ЛЮБОЙ цепочки с хуком input/forward (в том числе
+# в эту таблицу), и правила после такой вставки для трафика оверлея не срабатывают.
+# prerouting (priority mangle) идёт до DNAT Docker, поэтому dport здесь — порт хоста; у PROXY-портов
+# он совпадает с портом контейнера. reject в prerouting недоступен — только drop.
+
+define GATEWAY = {{GATEWAY_OVERLAY_IP}}            # HAProxy и relay на шлюзе (адрес в оверлее)
+define GATEWAY_PUBLIC = {{GATEWAY_PUBLIC_IPV4}}    # публичный адрес шлюза (MX)
+
+table inet mailcow_edge
+delete table inet mailcow_edge
+
+table inet mailcow_edge {
+	chain prerouting {
+		type filter hook prerouting priority mangle; policy accept;
+
+		# IPv6 к опубликованным портам обслуживает docker-proxy, и mailcow видит такое соединение
+		# с 172.22.1.1 (входит в mynetworks) — open relay для любого, кто дотянется по IPv6.
+		# Трафик из самих контейнеров mailcow (исходящий IPv6) не трогаем.
+		meta nfproto ipv6 iifname != "{{MAILCOW_BRIDGE}}" tcp dport { {{IPV6_DROP_PORTS}} } counter drop
+
+		# PROXY-порты mailcow (haproxy-listeners): Postfix верит заголовку PROXY от любого,
+		# поэтому пускаем только HAProxy со шлюза — иначе подделка 127.0.0.1 даёт open relay.
+		iifname "{{OVERLAY_IFACE}}" ip saddr $GATEWAY tcp dport { {{PROXY_PORTS}} } accept
+		iifname != "{{MAILCOW_BRIDGE}}" tcp dport { {{PROXY_PORTS}} } counter drop
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+
+		# Контейнеры mailcow не отправляют почту напрямую из офиса (включая watchdog, который
+		# игнорирует relayhost) — вся исходящая идёт через relay на шлюзе. Исключение — порт 25
+		# самого шлюза (уведомления watchdog в свои домены, проверки).
+		# Вставки клиентов mesh-VPN здесь не мешают: они срабатывают только на трафик из интерфейса оверлея.
+		iifname "{{MAILCOW_BRIDGE}}" oifname != "{{MAILCOW_BRIDGE}}" tcp dport 25 ip daddr != $GATEWAY_PUBLIC counter reject with tcp reset
+		iifname "{{MAILCOW_BRIDGE}}" oifname != "{{MAILCOW_BRIDGE}}" meta nfproto ipv6 tcp dport 25 counter reject with tcp reset
+	}
+}

@@ -1,0 +1,37 @@
+#!/usr/sbin/nft -f
+# /etc/mail-edge.nft — ограничения на шлюзе для PROXY-портов mailcow и порта relay.
+# Файл создаётся gateway/install.sh из gateway/templates/mail-edge.nft.tmpl; загружается
+# mail-edge.service. Отдельная таблица: правила Docker, ufw и оверлея её не трогают.
+#
+# PROXY-порты: Postfix в mailcow верит заголовку PROXY от любого, кто к ним подключился, поэтому
+# с шлюза к ним может ходить только HAProxy. Любой другой локальный процесс или контейнер на шлюзе
+# смог бы подделать адрес клиента (127.0.0.1 — и mailcow становится open relay).
+#
+# Хуки output/prerouting выбраны намеренно: клиенты mesh-VPN могут вставлять
+# "iifname <оверлей> accept" в начало любой цепочки с хуком input/forward, в том числе
+# в чужие таблицы, и правила после такой вставки для трафика оверлея не срабатывают.
+# reject в prerouting недоступен — там только drop.
+
+define BACKEND = {{BACKEND_OVERLAY_IP}}
+
+table inet mail_edge
+delete table inet mail_edge
+
+table inet mail_edge {
+	chain output {
+		type filter hook output priority filter - 10; policy accept;
+		# Локальные процессы шлюза: к PROXY-портам бэкенда — только пользователь haproxy.
+		# Имя пользователя разрешается при загрузке таблицы: пакет haproxy должен быть установлен.
+		ip daddr $BACKEND tcp dport { {{PROXY_PORTS}} } meta skuid != "haproxy" counter reject with tcp reset
+	}
+
+	chain prerouting {
+		type filter hook prerouting priority mangle; policy accept;
+		# Транзитный трафик к PROXY-портам бэкенда (контейнеры Docker на шлюзе — reverse proxy и др.).
+		iifname != "{{OVERLAY_IFACE}}" ip daddr $BACKEND tcp dport { {{PROXY_PORTS}} } counter drop
+
+		# Relay Postfix: на публичном адресе закрыт полностью, в оверлее — только с бэкенда.
+		ip daddr {{GATEWAY_PUBLIC_IPV4}} tcp dport {{RELAY_PORT}} iifname != "lo" counter drop
+		ip daddr {{GATEWAY_OVERLAY_IP}} tcp dport {{RELAY_PORT}} ip saddr != $BACKEND counter drop
+	}
+}

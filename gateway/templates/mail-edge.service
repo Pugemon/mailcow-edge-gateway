@@ -1,0 +1,16 @@
+# /etc/systemd/system/mail-edge.service — ограничения для PROXY-портов mailcow и relay (см. /etc/mail-edge.nft)
+[Unit]
+Description=mail edge firewall for mailcow PROXY ports (nft table inet mail_edge)
+Wants=network-pre.target
+After=network-pre.target
+Before=haproxy.service docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/mail-edge.nft
+ExecReload=/usr/sbin/nft -f /etc/mail-edge.nft
+ExecStop=/usr/sbin/nft delete table inet mail_edge
+
+[Install]
+WantedBy=multi-user.target

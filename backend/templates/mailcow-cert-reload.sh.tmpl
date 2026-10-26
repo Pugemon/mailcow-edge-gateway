@@ -1,0 +1,9 @@
+#!/bin/sh
+# /usr/local/sbin/mailcow-cert-reload.sh — вызывается acme.sh после выпуска/продления сертификата
+# mailcow (--reloadcmd). Перечитывает сертификат в Postfix, Dovecot и nginx; если reload не
+# удался — перезапускает эти контейнеры.
+cd "{{MAILCOW_DIR}}" || exit 1
+docker compose exec -T postfix-mailcow postfix reload &&
+  docker compose exec -T dovecot-mailcow doveadm reload &&
+  docker compose exec -T nginx-mailcow nginx -s reload ||
+  docker compose restart postfix-mailcow dovecot-mailcow nginx-mailcow

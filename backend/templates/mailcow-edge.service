@@ -1,0 +1,16 @@
+# /etc/systemd/system/mailcow-edge.service — периметр mailcow (см. /etc/mailcow-edge.nft)
+[Unit]
+Description=mailcow edge firewall (nft table inet mailcow_edge)
+Wants=network-pre.target
+After=network-pre.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/mailcow-edge.nft
+ExecReload=/usr/sbin/nft -f /etc/mailcow-edge.nft
+ExecStop=/usr/sbin/nft delete table inet mailcow_edge
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# /etc/systemd/system/haproxy.service.d/mail-edge.conf
+# HAProxy стартует после сети, таблицы mail_edge и клиента оверлейной сети.
+[Unit]
+Wants=network-online.target
+After=network-online.target mail-edge.service {{OVERLAY_SERVICE}}
