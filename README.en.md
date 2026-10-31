@@ -38,6 +38,7 @@ cd /opt/mailcow-edge-gateway
 # backend
 sudo cp examples/backend.conf backend.conf && sudo $EDITOR backend.conf
 sudo backend/install.sh --dry-run && sudo backend/install.sh
+sudo systemctl restart docker && (cd /opt/mailcow-dockerized && sudo docker compose up -d)
 sudo backend/issue-cert.sh --staging && sudo backend/issue-cert.sh --production
 
 # gateway

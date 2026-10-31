@@ -91,8 +91,9 @@ say() {
   printf '>>> %s\n' "$1"
   printf '%s\r\n' "$1" >&3
 }
+# finish CODE — вежливо закрыть сессию (QUIT без эха: итог остаётся последней строкой) и выйти.
 finish() {
-  say "QUIT"
+  printf 'QUIT\r\n' >&3 2>/dev/null || true
   reply >/dev/null 2>&1 || true
   exec 3<&-
   exit "$1"

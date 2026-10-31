@@ -60,6 +60,7 @@ cd /opt/mailcow-edge-gateway
 # бэкенд
 sudo cp examples/backend.conf backend.conf && sudo $EDITOR backend.conf
 sudo backend/install.sh --dry-run && sudo backend/install.sh
+sudo systemctl restart docker && (cd /opt/mailcow-dockerized && sudo docker compose up -d)
 sudo backend/issue-cert.sh --staging && sudo backend/issue-cert.sh --production
 
 # шлюз
@@ -89,8 +90,13 @@ $ tools/check-tls.sh mail.example.com
 итого: OK 7, WARN 0, FAIL 0
 
 $ tools/check-relay.sh mail.example.com
+<<< 220 mail.example.com ESMTP
+>>> EHLO client.example.net
 ...
+>>> RCPT TO:<probe@example.net>
 <<< 554 5.7.1 <probe@example.net>: Relay access denied
+>>> RSET
+<<< 250 2.0.0 Ok
 
 OK    relay запрещён (554 Relay access denied)
 ```

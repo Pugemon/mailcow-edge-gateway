@@ -166,7 +166,7 @@ if [ -n "$RENDER_DIR" ]; then
   log "Файлы записаны в $RENDER_DIR"
   for f in $FILES; do info "$RENDER_DIR$f"; done
   info ""
-  info "Проверка синтаксиса там, где установлены haproxy и nft: make validate (см. tests/validate-configs.sh)"
+  info "Синтаксис (haproxy -c, nft -c) проверяет sudo gateway/install.sh --dry-run на шлюзе"
   exit 0
 fi
 
