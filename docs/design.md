@@ -1,4 +1,4 @@
-# Как устроено и почему
+# Архитектура
 
 Адреса в примерах: публичный адрес шлюза `203.0.113.10`, шлюз в оверлее `100.64.0.10`, бэкенд
 (сервер mailcow) в оверлее `100.64.0.20`, интерфейс оверлея `wg0`, сеть контейнеров mailcow
@@ -11,7 +11,7 @@
 | шлюз   | HAProxy, mode tcp, PROXY v2           | `/etc/haproxy/haproxy.cfg`, `deny-src.lst`, `smtp-allow.lst` |
 | шлюз   | nftables, таблица `inet mail_edge`    | `/etc/mail-edge.nft`, `mail-edge.service`                  |
 | шлюз   | Postfix relay на 2525                 | `/etc/postfix/main.cf`, `master.cf` (через `postconf`)     |
-| шлюз   | reverse proxy для веба (NPM/nginx)    | настраивается отдельно, см. `docs/reverse-proxy.md`        |
+| шлюз   | reverse proxy для веба (NPM/nginx)    | настраивается отдельно, см. [Reverse proxy](reverse-proxy.md) |
 | бэкенд | nftables, таблица `inet mailcow_edge` | `/etc/mailcow-edge.nft`, `mailcow-edge.service`            |
 | бэкенд | haproxy-listeners mailcow             | `mailcow.conf` (`*_PORT_HAPROXY`), `docker-compose.override.yml` |
 | бэкенд | Dovecot / nginx / Postfix mailcow     | `data/conf/dovecot/extra.conf`, `data/conf/nginx/site.real-ip-gateway.custom`, `data/conf/postfix/extra.cf` |
@@ -27,6 +27,22 @@
 mailcow видит реальный адрес отправителя: DNSBL, SPF, rspamd, greylisting и fail2ban работают как
 при прямом подключении.
 
+Как выглядит входящее соединение:
+
+```mermaid
+sequenceDiagram
+    participant S as Отправитель
+    participant H as HAProxy (шлюз)
+    participant M as postscreen / smtpd mailcow
+    S->>H: TCP 203.0.113.10:25
+    Note over H: deny-src, allowlist до переключения MX
+    H->>M: TCP 100.64.0.20:10025 по оверлею
+    H->>M: заголовок PROXY v2 (адрес и порт отправителя)
+    M-->>S: 220 mail.example.com ESMTP (через HAProxy)
+    S->>M: EHLO, STARTTLS, сертификат mailcow, SMTP-диалог
+    Note over H: байты идут без изменений — шлюз не видит содержимого
+```
+
 **Клиенты (465, 587, 143, 993, 995, 4190).** То же самое, порты 10465, 10587, 10143, 10993, 10995,
 14190. TLS (неявный или STARTTLS) терминирует mailcow — на шлюзе нет ни сертификата почты, ни паролей.
 
@@ -39,72 +55,6 @@ mailcow видит реальный адрес отправителя: DNSBL, SP
 **Веб.** Reverse proxy на шлюзе терминирует TLS своим сертификатом для `mail.`, `autodiscover.`,
 `autoconfig.`, `mta-sts.` и проксирует на `https://100.64.0.20:443` с SNI исходного имени. nginx mailcow
 берёт адрес клиента из `X-Forwarded-For`, доверяя только адресу шлюза (`set_real_ip_from`).
-
-## Модель угроз
-
-### Что защищаем
-
-- mailcow не должен стать open relay — ни через подделку адреса клиента, ни через внутренние сети;
-- исходящая почта уходит только с адреса с правильными PTR и SPF (репутация домена);
-- в офисной сети не открыт ни один входящий порт; связь только по оверлею;
-- на шлюзе нет секретов почты (TLS-ключ, пароли, письма) — его компрометация не раскрывает переписку
-  напрямую (но см. «Остаточные риски»).
-
-### Главный риск: подделка адреса в PROXY-заголовке
-
-Postfix на haproxy-listeners mailcow (`postscreen_upstream_proxy_protocol` /
-`smtpd_upstream_proxy_protocol = haproxy`) принимает PROXY-заголовок от **любого** подключившегося: параметра «доверенные отправители заголовка» у Postfix нет. Адрес из
-заголовка становится адресом клиента для всех проверок. В `mynetworks` mailcow входят `127.0.0.0/8`
-и сеть контейнеров `172.22.1.0/24` — кто сможет подключиться к 10025/10465/10587 и написать в заголовке
-такой адрес, получит отправку куда угодно без авторизации.
-
-У Dovecot такой список есть (`haproxy_trusted_networks`), но полагаться только на него нельзя: SMTP
-важнее.
-
-### Три барьера
-
-| # | Где    | Механизм | Что закрывает |
-|---|--------|----------|---------------|
-| 1 | бэкенд | nftables `inet mailcow_edge`, `prerouting` priority mangle: к PROXY-портам `iifname wg0 ip saddr 100.64.0.10 accept`, остальное (кроме `br-mailcow`) `drop` | другие узлы оверлея, LAN офиса, другие Docker-сети на бэкенде |
-| 2 | шлюз   | nftables `inet mail_edge`: `output` — к PROXY-портам бэкенда только `meta skuid haproxy`, остальным `reject`; `prerouting` — транзитный трафик к ним `drop` | локальные процессы и контейнеры на шлюзе (в том числе reverse proxy в Docker) |
-| 3 | шлюз   | HAProxy: `tcp-request connection reject if { src -f deny-src.lst }` на каждом входе | соединения к самому HAProxy из частных и служебных сетей: их адрес попал бы в заголовок как «внешний клиент» (например, контейнер на шлюзе, чья сеть совпала с сетью контейнеров mailcow) |
-
-Барьеры независимы: ошибка в одном не открывает relay, пока работают остальные.
-
-Почему именно `prerouting` и `output`, а не `input`/`forward` — см. «Подводные камни», п. 1.
-
-### Остальные меры
-
-- **Docker без docker-proxy** (`"userland-proxy": false`) и **drop IPv6** на почтовые и PROXY-порты
-  бэкенда — иначе IPv6-клиент виден mailcow как `172.22.1.1` (п. 3 подводных камней).
-- **Dovecot `haproxy_trusted_networks = 100.64.0.10/32`** — Dovecot принимает PROXY-заголовок только от шлюза.
-- **Relay на шлюзе**: `mynetworks = 127.0.0.0/8 100.64.0.20/32`, `smtpd_*_restrictions = permit_mynetworks, reject`,
-  порт 2525 на публичном адресе закрыт таблицей `mail_edge`, в оверлее — только с бэкенда.
-- **tcp/25 из контейнеров mailcow наружу** — `reject`, кроме публичного адреса шлюза: письма не уходят
-  с офисного адреса в обход relay.
-- **Порт 25 до переключения** — только allowlist.
-- **Шлюз в whitelist Fail2ban mailcow** — защита доступности, а не конфиденциальности.
-
-### Остаточные риски
-
-- **root на шлюзе** может отправить в mailcow любой PROXY-заголовок (от имени `haproxy`) и видит
-  трафик веба в открытом виде (reverse proxy терминирует TLS). Шлюз — доверенный узел: обновления,
-  ключи SSH, минимум сервисов.
-- **Локальные процессы на бэкенде.** Пакеты, порождённые на самом хосте, не проходят `prerouting`,
-  поэтому барьер 1 их не видит. Бэкенд должен быть выделенным сервером без посторонних пользователей.
-  Если это не так, добавьте в таблицу `mailcow_edge` цепочку `output` по образцу шлюза:
-
-  ```
-  chain output {
-      type filter hook output priority mangle; policy accept;
-      ip daddr { 100.64.0.20, 127.0.0.1 } tcp dport { 10025, 10110, 10143, 10465, 10587, 10993, 10995, 14190 } meta skuid != 0 counter reject with tcp reset
-  }
-  ```
-
-  (в шаблон не входит — проверьте на своей системе до включения).
-- **Обычные опубликованные порты mailcow** (25, 443 и т.д. на бэкенде) доступны узлам оверлея и LAN
-  напрямую, мимо шлюза. Это не relay (адрес такого клиента не в mynetworks), но если узлам оверлея
-  нельзя доверять, ограничьте эти порты отдельно — тоже в `prerouting`.
 
 ## Почему так, а не иначе
 
@@ -124,75 +74,9 @@ Postfix на haproxy-listeners mailcow (`postscreen_upstream_proxy_protocol` /
 - **mailcow целиком на VPS** — проще, если допустимо хранить почту у хостера. Этот репозиторий — для
   случая, когда нельзя.
 
-## Подводные камни
+## Безопасность
 
-1. **Клиенты mesh-VPN могут вставлять свои accept-правила в цепочки input/forward.** Некоторые из них
-   добавляют `iifname <интерфейс оверлея> accept` в начало любой цепочки с хуком input/forward — во всех
-   таблицах nftables, включая созданные вами. Правила после такой вставки для трафика из оверлея не
-   срабатывают. Поэтому фильтр оверлея живёт в `prerouting` (priority mangle — до DNAT Docker, `dport`
-   ещё порт хоста) и `output`. В `prerouting` нет `reject` — только `drop`, поэтому запрещённые
-   подключения из оверлея заканчиваются таймаутом, а не отказом. Проверяйте `nft list ruleset` после
-   запуска клиента оверлея.
-2. **ACL оверлея не защищают порты, опубликованные Docker.** Опубликованный порт — это DNAT и цепочка
-   forward, а не сокет хоста; политики доступа mesh-VPN их не покрывают. Защищать нужно самим nftables.
-3. **docker-proxy и IPv6.** При `userland-proxy: true` (по умолчанию) IPv6-соединение к опубликованному
-   порту принимает процесс docker-proxy и открывает новое соединение в контейнер по IPv4 — с адреса
-   `172.22.1.1`, который входит в mynetworks mailcow. Любой, кто дотянется до бэкенда по IPv6 (в том числе
-   через оверлей), получает open relay. Лечение: `"userland-proxy": false` в `/etc/docker/daemon.json`
-   (рестарт Docker) и drop IPv6 на почтовые и PROXY-порты в `prerouting` (исходящий IPv6 из контейнеров
-   mailcow не затрагивается).
-4. **Postfix доверяет любому PROXY-заголовку** — см. модель угроз. Никогда не добавляйте адрес шлюза
-   или сеть оверлея в mynetworks mailcow.
-5. **Dovecot: `haproxy_trusted_networks`, а не `login_trusted_networks`.** Второй параметр разрешает
-   подменять адрес и снимает запрет на вход открытым паролем без TLS (`disable_plaintext_auth`) — для
-   всех соединений через шлюз.
-6. **nginx mailcow: не дублировать `real_ip_header`.** В конфигурации mailcow `real_ip_header
-   X-Forwarded-For` и `real_ip_recursive on` уже есть; второй `real_ip_header` в том же блоке —
-   ошибка «is duplicate», nginx не стартует. `backend/install.sh` пишет только `set_real_ip_from` и
-   добавляет `real_ip_header`, лишь если в `nginx -T` его нет.
-7. **Fail2ban (Netfilter) mailcow банит по адресу.** Если хоть раз в его логах окажется адрес шлюза
-   (веб без `set_real_ip_from`, ошибка конфигурации), бан шлюза отключит всю внешнюю почту и веб.
-   Шлюз — в whitelist.
-8. **`myhostname` relay должен отличаться от `myhostname` mailcow.** Postfix mailcow, увидев своё имя
-   в приветствии сервера, к которому подключился, считает это петлёй и возвращает письмо
-   («mail for … loops back to myself»). Отдельное имя relay (`relay.example.com`) в DNS не нужно.
-9. **`smtp_helo_name` relay = публичное имя mailcow**, совпадающее с PTR адреса шлюза: проверка
-   «HELO ↔ PTR ↔ A» у получателей.
-10. **`inet_protocols = ipv4` на relay**, если у VPS нет PTR для IPv6 (почти всегда): крупные почтовики
-    отклоняют письма по IPv6 без PTR. При `all` нужен ещё `smtp_bind_address6` и закрытие порта relay
-    для IPv6.
-11. **`disable_mime_output_conversion = yes` на relay**: иначе при доставке на сервер без 8BITMIME
-    Postfix перекодирует тело в quoted-printable, и подпись DKIM, поставленная mailcow, ломается.
-12. **Watchdog mailcow игнорирует relayhost** и отправляет уведомления напрямую на MX получателя.
-    Поэтому из `br-mailcow` наружу tcp/25 закрыт (`reject`), кроме публичного адреса шлюза — уведомления
-    в свои домены проходят через HAProxy (внешний адрес офиса держите в `SMTP_ALLOWLIST` до переключения).
-13. **`meta skuid "haproxy"` разрешается при загрузке таблицы.** Если пользователя `haproxy` ещё нет,
-    `nft -f` падает. `gateway/install.sh` ставит пакет haproxy до загрузки таблицы; `mail-edge.service`
-    стартует до haproxy.service, но пользователь к этому времени уже существует.
-14. **`flush ruleset` в `/etc/nftables.conf`.** Конфиг Debian по умолчанию начинается с него.
-    `systemctl restart nftables` на работающей системе стирает и правила Docker, и таблицы этого
-    репозитория. После такого: `systemctl restart docker mailcow-edge` (бэкенд) или
-    `systemctl restart mail-edge docker` (шлюз). Таблицы этого репозитория — отдельные `inet`-таблицы,
-    свои правила держите в своих таблицах, без `flush ruleset`.
-15. **`net.ipv4.ip_nonlocal_bind = 1` на бэкенде**: PROXY-порты публикуются на адресе оверлея; если
-    интерфейс оверлея поднимется позже Docker, без этого контейнеры postfix/dovecot не запустятся.
-16. **Порт 25 — только allowlist до переключения MX**, автонастройка клиентов — 404 до переключения.
-    Иначе почта и клиенты «переедут» раньше, чем вы готовы.
-17. **MTA-STS старого провайдера.** Если у домена уже опубликована политика `enforce` без нового MX,
-    отправители, закэшировавшие её, откажутся доставлять на новый сервер. Политика с обоими MX
-    должна действовать не меньше `max_age` старой до переключения (см. `docs/mta-sts.md`).
-18. **acme.sh по умолчанию использует ZeroSSL.** Если CAA домена разрешает только Let's Encrypt, выпуск
-    падает. `backend/issue-cert.sh` задаёт `--server letsencrypt` и `--set-default-ca`.
-19. **acme.sh запоминает CA и пути установки для каждого домена.** Продление по cron идёт через тот CA,
-    которым сертификат выпущен последний раз, и сразу устанавливает результат в mailcow (пути
-    `--install-cert`). Тестовый выпуск (`letsencrypt_test`) поверх боевого привёл бы к тому, что
-    следующее продление положит в mailcow недоверенный сертификат, — `issue-cert.sh --staging` в этой
-    ситуации останавливается. Переход с тестового на боевой требует `--force` (скрипт делает это сам).
-20. **Health check в HAProxy не используется**: сервер один, переключаться некуда, а проверка без
-    PROXY-заголовка даёт ошибки в логах mailcow.
-21. **Таймауты HAProxy**: IMAP IDLE держится до 29 минут, поэтому у `imap`/`imaps` таймаут 35 минут;
-    у остальных — 10 минут.
-22. **MTU оверлея.** Если мелкие письма проходят, а крупные зависают на отправке через relay или на
-    приёме — проверьте MTU интерфейса оверлея и прохождение ICMP «fragmentation needed».
-23. **POP3 на 110** обычно не нужен: клиенты с POP3 работают через 995. Если нужен — добавьте `pop3`
-    в `SERVICES` на обоих узлах.
+Ключевое ограничение схемы — Postfix в mailcow доверяет любому PROXY-заголовку. Как его закрывают
+три независимых барьера (nftables на бэкенде, nftables на шлюзе, deny-src в HAProxy) и какие риски
+остаются — в [модели угроз](threat-model.md). Неочевидные детали реализации — в
+[подводных камнях](pitfalls.md).

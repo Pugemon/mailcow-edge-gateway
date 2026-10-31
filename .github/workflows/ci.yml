@@ -38,3 +38,13 @@ jobs:
           nft --version
       - name: Отрендерить примеры и проверить синтаксис
         run: sudo env STRICT=1 bash tests/validate-configs.sh
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-docs.txt
+      - run: make docs          # справочник команд из --help + mkdocs build --strict

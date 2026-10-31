@@ -2,30 +2,37 @@
 
 ## Куда смотреть
 
-**Шлюз**
+=== "Шлюз"
 
-```sh
-sudo journalctl -u haproxy --since '15 min ago'          # или /var/log/haproxy.log (rsyslog)
-echo 'show stat' | sudo socat stdio /run/haproxy/admin.sock | cut -d, -f1,2,5,8,18   # сессии, статус
-sudo nft list table inet mail_edge                       # счётчики drop/reject растут — кто-то стучится
-sudo ss -tnp | grep -E ':(10025|10465|10587|10143|10993|10110|10995|14190)\b'   # соединения HAProxy к бэкенду
-sudo journalctl --since '15 min ago' | grep -E 'postfix/(from-mailcow/smtpd|smtp)\['   # relay
-sudo postqueue -p                                        # очередь relay
-sudo tcpdump -ni wg0 host 100.64.0.20 and port 10025     # трафик к бэкенду по оверлею
-```
+    ```sh
+    sudo journalctl -u haproxy --since '15 min ago'          # или /var/log/haproxy.log (rsyslog)
+    echo 'show stat' | sudo socat stdio /run/haproxy/admin.sock | cut -d, -f1,2,5,8,18   # сессии, статус
+    sudo nft list table inet mail_edge                       # счётчики drop/reject растут — кто-то стучится
+    sudo ss -tnp | grep -E ':(10025|10465|10587|10143|10993|10110|10995|14190)\b'   # соединения HAProxy к бэкенду
+    sudo journalctl --since '15 min ago' | grep -E 'postfix/(from-mailcow/smtpd|smtp)\['   # relay
+    sudo postqueue -p                                        # очередь relay
+    sudo tcpdump -ni wg0 host 100.64.0.20 and port 10025     # трафик к бэкенду по оверлею
+    ```
 
-**Бэкенд** (в каталоге mailcow)
+=== "Бэкенд"
 
-```sh
-sudo nft list table inet mailcow_edge
-sudo docker compose logs --since 15m postfix-mailcow dovecot-mailcow nginx-mailcow netfilter-mailcow
-sudo docker compose exec postfix-mailcow postqueue -p    # очередь mailcow (ждёт relay?)
-sudo docker compose exec postfix-mailcow postconf relayhost
-sudo docker compose config | grep -A3 'host_ip: 100.64.0.20'
-sudo tcpdump -ni wg0 port 10025 or port 2525
-```
+    В каталоге mailcow:
 
-Снаружи: `tools/check-tls.sh mail.example.com`, `tools/check-relay.sh mail.example.com`.
+    ```sh
+    sudo nft list table inet mailcow_edge
+    sudo docker compose logs --since 15m postfix-mailcow dovecot-mailcow nginx-mailcow netfilter-mailcow
+    sudo docker compose exec postfix-mailcow postqueue -p    # очередь mailcow (ждёт relay?)
+    sudo docker compose exec postfix-mailcow postconf relayhost
+    sudo docker compose config | grep -A3 'host_ip: 100.64.0.20'
+    sudo tcpdump -ni wg0 port 10025 or port 2525
+    ```
+
+=== "Снаружи"
+
+    ```sh
+    tools/check-tls.sh mail.example.com     # TLS и сертификат на всех почтовых портах
+    tools/check-relay.sh mail.example.com   # open relay: OK / WARN / FAIL
+    ```
 
 ## Симптомы
 
@@ -37,7 +44,7 @@ Streams NPM или DNAT, а не через HAProxy.
 **Postfix: `haproxy read: …`, `lost connection after CONNECT`; Dovecot: `haproxy: …` ошибки.**
 Несовпадение PROXY / не-PROXY: на PROXY-порт пришло соединение без заголовка (health check, ручной
 `nc`, другой прокси) или HAProxy шлёт заголовок на обычный порт. Сверьте порты в `haproxy.cfg` и
-таблицу портов в README.
+[таблицу портов](configuration.md#ports).
 
 **Dovecot: `haproxy: Client not trusted`.**
 Адрес, с которого Dovecot видит соединение, не входит в `haproxy_trusted_networks`. Причины: в

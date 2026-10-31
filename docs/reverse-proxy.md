@@ -16,7 +16,7 @@ Nginx Proxy Manager (NPM); для обычного nginx есть готовый
 | `mta-sts.<домен>`          | политика MTA-STS (каждый почтовый домен)               |
 
 Сертификат для этих имён выпускает сам reverse proxy (HTTP-01 — если все имена уже указывают на шлюз,
-иначе DNS-01). Он не связан с сертификатом mailcow на почтовых портах (`docs/certificate.md`).
+иначе DNS-01). Он не связан с [сертификатом mailcow](certificate.md) на почтовых портах.
 
 ## Nginx Proxy Manager
 
@@ -82,6 +82,12 @@ location ~* ^/(autodiscover/|mail/config-v1\.1\.xml|\.well-known/autoconfig/|Mic
 `X-Forwarded-*`, websocket и большими буферами/таймаутами. Подставьте свои имена, путь к сертификату
 и адрес бэкенда.
 
+??? example "examples/nginx-reverse-proxy.conf"
+
+    ```nginx
+    --8<-- "examples/nginx-reverse-proxy.conf"
+    ```
+
 ## Параметры и зачем они
 
 - `proxy_ssl_server_name on; proxy_ssl_name $host;` — nginx mailcow выбирает виртуальный хост по SNI.
@@ -102,7 +108,7 @@ Reverse proxy передаёт адрес клиента в `X-Forwarded-For`. n
 Проверка (на бэкенде): `docker compose logs --since 5m nginx-mailcow` — в логе внешние адреса,
 а не `100.64.0.10`.
 
-## Заглушка автонастройки до переключения
+## Заглушка автонастройки до переключения {#autoconfig-stub}
 
 Пока MX смотрит на старого провайдера, новые Outlook, Thunderbird и телефоны не должны находить новый
 сервер через autodiscover/autoconfig — иначе пользователи настроятся на пустые ящики. Заглушка

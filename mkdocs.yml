@@ -1,0 +1,92 @@
+site_name: mailcow-edge-gateway
+site_description: Публикация mailcow из-за NAT через внешний шлюз — HAProxy с PROXY protocol v2, relay Postfix, nftables
+site_url: https://pugemon.github.io/mailcow-edge-gateway/
+repo_url: https://github.com/pugemon/mailcow-edge-gateway
+repo_name: pugemon/mailcow-edge-gateway
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Vyacheslav Ivanov · BSD-3-Clause
+
+theme:
+  name: material
+  language: ru
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle: {icon: material/weather-night, name: Тёмная тема}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle: {icon: material/weather-sunny, name: Светлая тема}
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - toc.follow
+
+validation:
+  anchors: warn   # битые ссылки на якоря — ошибка при --strict
+
+plugins:
+  - search:
+      lang: [ru, en]
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/pugemon
+
+nav:
+  - Обзор: index.md
+  - Быстрый старт: quickstart.md
+  - Установка:
+      - Требования: requirements.md
+      - Пошаговая установка: install.md
+      - Переключение MX: cutover.md
+      - Конфигурация: configuration.md
+  - Веб и сертификаты:
+      - Reverse proxy: reverse-proxy.md
+      - Сертификат mailcow: certificate.md
+      - MTA-STS: mta-sts.md
+  - Как устроено:
+      - Архитектура: design.md
+      - Модель угроз: threat-model.md
+      - Подводные камни: pitfalls.md
+  - Отладка: troubleshooting.md
+  - Справочник команд: commands.md
+  - Изменения: changelog.md

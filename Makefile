@@ -3,16 +3,17 @@
 
 SHELL := /bin/bash
 SHELLCHECK ?= shellcheck
+MKDOCS ?= mkdocs
 RENDER_DIR ?= render
 
 SCRIPTS := lib/common.sh gateway/install.sh gateway/setup-relay.sh backend/install.sh \
            backend/issue-cert.sh tools/check-tls.sh tools/check-relay.sh \
-           tests/run.sh tests/validate-configs.sh
+           tests/run.sh tests/validate-configs.sh dev/gen-commands.sh
 SH_TEMPLATES := backend/templates/mailcow-cert-reload.sh.tmpl
 PY := tests/fake_smtp.py
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint validate render clean
+.PHONY: help test lint validate render docs docs-serve clean
 
 help: ## список целей
 	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  make %-11s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -34,5 +35,14 @@ render: ## отрендерить примеры конфигов в render/gate
 	@gateway/install.sh -c examples/gateway.conf --render $(RENDER_DIR)/gateway
 	@backend/install.sh -c examples/backend.conf --render $(RENDER_DIR)/backend
 
-clean: ## удалить render/
-	rm -rf $(RENDER_DIR)
+docs/commands.md: dev/gen-commands.sh lib/common.sh gateway/*.sh backend/*.sh tools/*.sh
+	@bash dev/gen-commands.sh > $@
+
+docs: docs/commands.md ## собрать сайт документации в site/ (mkdocs build --strict)
+	$(MKDOCS) build --strict
+
+docs-serve: docs/commands.md ## сайт документации на http://127.0.0.1:8000 с автообновлением
+	$(MKDOCS) serve
+
+clean: ## удалить site/, render/ и сгенерированный справочник команд
+	rm -rf site $(RENDER_DIR) docs/commands.md
