@@ -1,22 +1,68 @@
 # shellcheck shell=bash
+# Переменные ниже читают и меняют подключающие скрипты.
+# shellcheck disable=SC2034
 # Общие функции скриптов gateway/ и backend/: загрузка настроек, проверка значений,
 # рендер шаблонов, показ diff и установка файлов.
 #
 # Подключается из скриптов, которые сами включают set -euo pipefail.
 # Совместимо с bash 3.2, чтобы --render и --dry-run можно было запускать на рабочей машине.
 
+MEG_VERSION=0.1.0
+DOCS_URL=https://pugemon.github.io/mailcow-edge-gateway
+
 TS=$(date +%Y%m%d-%H%M%S)
 DRY_RUN=${DRY_RUN:-0}
+ASSUME_YES=${ASSUME_YES:-0}   # --yes: не спрашивать подтверждение
 BACKUP_ROOT=${BACKUP_ROOT:-/var/backups/mailcow-edge-gateway}
 CHANGED=0   # сколько файлов изменено (в --dry-run — сколько было бы изменено)
 APPLIED=0   # 1, если последний вызов apply_file изменил (изменил бы) файл
+BACKED_UP=0 # 1, если хотя бы один существующий файл сохранён в $BACKUP_ROOT/$TS
+PENDING=""  # файлы к установке: строки "MODE<TAB>NEW<TAB>DST" (см. apply_file, commit_changes)
 STAGE=""
 
-log()  { printf '\n==> %s\n' "$*"; }
+# Цвет — только в терминале, без NO_COLOR (https://no-color.org) и не для TERM=dumb.
+color_ok() { [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; }
+C_BOLD="" C_GREEN="" C_YELLOW="" C_RED="" C_RESET=""
+if [ -t 1 ] && color_ok; then
+  C_BOLD=$'\033[1m' C_GREEN=$'\033[32m' C_YELLOW=$'\033[33m' C_RED=$'\033[31m' C_RESET=$'\033[0m'
+fi
+E_YELLOW="" E_RED="" E_RESET=""
+if [ -t 2 ] && color_ok; then
+  E_YELLOW=$'\033[33m' E_RED=$'\033[31m' E_RESET=$'\033[0m'
+fi
+
+log()  { printf '\n%s==> %s%s\n' "$C_BOLD" "$*" "$C_RESET"; }
 info() { printf '    %s\n' "$*"; }
-warn() { printf 'ВНИМАНИЕ: %s\n' "$*" >&2; }
-die()  { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
+ok()   { printf '    %sOK%s    %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%sВНИМАНИЕ:%s %s\n' "$E_YELLOW" "$E_RESET" "$*" >&2; }
+die()  { printf '%sОШИБКА:%s %s\n' "$E_RED" "$E_RESET" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# die_usage MESSAGE — ошибка в аргументах командной строки (код возврата 2).
+die_usage() {
+  printf '%sОШИБКА:%s %s\nСправка: %s --help\n' "$E_RED" "$E_RESET" "$*" "$0" >&2
+  exit 2
+}
+
+print_version() { printf 'mailcow-edge-gateway %s\n' "$MEG_VERSION"; }
+
+# confirm QUESTION — спросить «да/нет» в терминале. С --yes (ASSUME_YES=1) ответ «да» без вопроса.
+# Без терминала и без --yes — ошибка: менять систему без явного согласия скрипт не будет.
+confirm() {
+  local answer=""
+  [ "$ASSUME_YES" = 1 ] && return 0
+  [ -t 0 ] || die "нужно подтверждение, а терминала нет: запустите с --yes (план изменений — --dry-run)"
+  printf '%s%s%s [y/N] ' "$C_BOLD" "$1" "$C_RESET"
+  read -r answer || true
+  case $answer in y|Y|yes|Yes|YES|д|Д|да|Да|ДА) return 0 ;; esac
+  return 1
+}
+
+# cancel — пользователь отказался от изменений.
+cancel() {
+  printf 'Отменено: %s\n' "${1:-ничего не изменено}" >&2
+  exit 1
+}
 
 is_root() { [ "$(id -u)" -eq 0 ]; }
 need_root() {
@@ -213,10 +259,10 @@ stage_copy() {
   printf '%s\n' "$s"
 }
 
-# apply_file NEW DST [MODE] — показать diff между установленным DST и NEW; кроме --dry-run,
-# установить NEW на место DST. Предыдущая версия сохраняется в $BACKUP_ROOT/<время>/<путь>.
-# Владелец и права существующего файла сохраняются, новый файл создаётся с правами MODE.
-# Результат — в APPLIED (1 — файл изменён), счётчик CHANGED увеличивается.
+# apply_file NEW DST [MODE] — показать diff между установленным DST и NEW и, если они различаются,
+# поставить NEW в очередь на установку. Сами файлы меняет commit_changes — после того как показан
+# весь план и получено подтверждение. NEW не должен меняться до commit_changes.
+# Результат — в APPLIED (1 — файл будет изменён), счётчик CHANGED увеличивается.
 apply_file() {
   local new=$1 dst=$2 mode=${3:-0644} old=$2
   APPLIED=0
@@ -229,19 +275,42 @@ apply_file() {
   diff -u -L "$dst (сейчас)" -L "$dst (будет)" "$old" "$new" | sed 's/^/    /' || true
   APPLIED=1
   CHANGED=$((CHANGED + 1))
-  if [ "$DRY_RUN" = 1 ]; then
-    return 0
-  fi
+  PENDING="$PENDING$mode"$'\t'"$new"$'\t'"$dst"$'\n'
+}
+
+# install_file NEW DST MODE — установить NEW на место DST. Предыдущая версия сохраняется
+# в $BACKUP_ROOT/<время>/<путь>; владелец и права существующего файла сохраняются, новый файл
+# создаётся с правами MODE.
+install_file() {
+  local new=$1 dst=$2 mode=$3
   if [ -f "$dst" ]; then
     mkdir -p "$BACKUP_ROOT/$TS$(dirname "$dst")"
     cp -p "$dst" "$BACKUP_ROOT/$TS$dst"
     cat "$new" > "$dst"
+    BACKED_UP=1
     info "обновлён: $dst (старая версия: $BACKUP_ROOT/$TS$dst)"
   else
     mkdir -p "$(dirname "$dst")"
     install -m "$mode" "$new" "$dst"
     info "создан: $dst"
   fi
+}
+
+# commit_changes [QUESTION] — спросить подтверждение (confirm) и установить файлы из очереди
+# apply_file. В --dry-run и когда менять нечего — ничего не делает. Отказ — выход без изменений.
+commit_changes() {
+  local mode new dst
+  [ "$DRY_RUN" != 1 ] || return 0
+  [ -n "$PENDING" ] || return 0
+  confirm "${1:-Применить изменения (файлов: $CHANGED)?}" || cancel "файлы не изменены"
+  log "Установка файлов"
+  while IFS=$'\t' read -r mode new dst; do
+    [ -n "$dst" ] || continue
+    install_file "$new" "$dst" "$mode"
+  done <<EOF
+$PENDING
+EOF
+  PENDING=""
 }
 
 # ensure_newline FILE — дописать перевод строки, если файл не пуст и не заканчивается им.
@@ -266,8 +335,8 @@ set_kv() {
 # дописать; при дописывании перед строкой ставится комментарий COMMENT (может быть многострочным).
 set_param() {
   local f=$1 k=$2 v=$3 comment=${4:-}
-  if grep -Eq "^$k[[:space:]]*=" "$f"; then
-    sed -i.sedtmp -E "s|^$k[[:space:]]*=.*|$k = $v|" "$f" && rm -f "$f.sedtmp"
+  if grep -Eq "^${k}[[:space:]]*=" "$f"; then
+    sed -i.sedtmp -E "s|^${k}[[:space:]]*=.*|$k = $v|" "$f" && rm -f "$f.sedtmp"
   else
     ensure_newline "$f"
     if [ -n "$comment" ]; then

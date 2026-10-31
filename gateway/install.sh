@@ -3,8 +3,9 @@
 # (mail-edge.service) и relay Postfix для исходящей почты (gateway/setup-relay.sh).
 #
 # Порядок: файлы готовятся во временном каталоге, проверяются (haproxy -c, nft -c), показывается
-# diff с установленными версиями, и только потом устанавливаются. Повторный запуск с теми же
-# настройками ничего не меняет. Предыдущие версии файлов — в /var/backups/mailcow-edge-gateway/.
+# diff с установленными версиями, и только после подтверждения (или --yes) устанавливаются.
+# Повторный запуск с теми же настройками ничего не меняет. Предыдущие версии файлов —
+# в /var/backups/mailcow-edge-gateway/.
 set -euo pipefail
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -13,14 +14,31 @@ REPO_DIR=$(dirname "$SELF_DIR")
 . "$REPO_DIR/lib/common.sh"
 
 usage() {
-  cat <<EOF
-Использование: gateway/install.sh [-c FILE] [--dry-run] [--render DIR] [--skip-relay] [--skip-packages]
+  cat <<'EOF'
+Использование: gateway/install.sh [-c FILE] [--dry-run | --render DIR] [--yes]
+                                  [--skip-relay] [--skip-packages]
 
+Установка шлюза: HAProxy (PROXY protocol v2 к mailcow), таблица nftables inet mail_edge,
+relay Postfix для исходящей почты. Показывает diff и спрашивает подтверждение.
+
+Параметры:
   -c, --config FILE  файл настроек (по умолчанию: gateway.conf в корне репозитория)
   --dry-run          подготовить файлы, проверить и показать diff; ничего не менять
   --render DIR       только записать готовые файлы в DIR (root не нужен, можно на рабочей машине)
+  -y, --yes          не спрашивать подтверждение (для автоматизации)
   --skip-relay       не настраивать Postfix relay
   --skip-packages    не устанавливать пакеты haproxy и nftables
+  -h, --help         эта справка
+  --version          версия
+
+Примеры:
+  gateway/install.sh -c examples/gateway.conf --render /tmp/gw   # посмотреть конфиги без root
+  sudo gateway/install.sh --dry-run                              # план изменений на шлюзе
+  sudo gateway/install.sh                                        # установка с подтверждением
+  sudo gateway/install.sh --yes                                  # без вопросов
+
+Коды возврата: 0 — готово (или нечего менять), 1 — ошибка или отказ от изменений,
+2 — неверные аргументы.
 EOF
 }
 
@@ -30,13 +48,15 @@ SKIP_RELAY=0
 SKIP_PACKAGES=0
 while [ $# -gt 0 ]; do
   case $1 in
-    -c|--config) CONF=${2:?не указан файл настроек}; shift 2 ;;
+    -c|--config) [ $# -ge 2 ] || die_usage "не указан файл настроек"; CONF=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    --render) RENDER_DIR=${2:?не указан каталог}; shift 2 ;;
+    --render) [ $# -ge 2 ] || die_usage "не указан каталог для --render"; RENDER_DIR=$2; shift 2 ;;
+    -y|--yes) ASSUME_YES=1; shift ;;
     --skip-relay) SKIP_RELAY=1; shift ;;
     --skip-packages) SKIP_PACKAGES=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) usage >&2; die "неизвестный аргумент: $1" ;;
+    --version) print_version; exit 0 ;;
+    *) die_usage "неизвестный аргумент: $1" ;;
   esac
 done
 
@@ -76,6 +96,15 @@ norm_cidr() {
   case $a in */*) ;; *) a=$a/32 ;; esac
   is_cidr4 "$a" || die "некорректный адрес в списке: '$1'"
   printf '%s\n' "$a"
+}
+
+# Публичные порты включённых сервисов — для итога установки.
+svc_summary() {
+  local s out=""
+  for s in $ALL_SERVICES; do
+    if svc_enabled "$s"; then out="$out $(svc_public_port "$s")"; fi
+  done
+  printf 'порты%s на %s' "$out" "$GATEWAY_PUBLIC_IPV4"
 }
 
 # ---------------------------------------------------------------- рендер
@@ -136,6 +165,8 @@ FILES="/etc/haproxy/haproxy.cfg /etc/haproxy/deny-src.lst /etc/haproxy/smtp-allo
 if [ -n "$RENDER_DIR" ]; then
   log "Файлы записаны в $RENDER_DIR"
   for f in $FILES; do info "$RENDER_DIR$f"; done
+  info ""
+  info "Проверка синтаксиса там, где установлены haproxy и nft: make validate (см. tests/validate-configs.sh)"
   exit 0
 fi
 
@@ -154,6 +185,7 @@ if [ "$SKIP_PACKAGES" != 1 ]; then
   elif [ -n "$missing" ]; then
     log "Пакеты:$missing"
     have apt-get || die "нет apt-get: установите$missing вручную и запустите с --skip-packages"
+    confirm "Установить пакеты:$missing (apt-get)?" || cancel "пакеты не установлены, файлы не изменены"
     apt-get update
     # shellcheck disable=SC2086
     DEBIAN_FRONTEND=noninteractive apt-get install -y $missing
@@ -198,7 +230,29 @@ if [ "$DRY_RUN" = 1 ]; then
     "$SELF_DIR/setup-relay.sh" -c "$CONF" --dry-run
   fi
   log "dry-run: ничего не изменено (файлов к изменению: $CHANGED)"
+  if [ "$CONF" = "$REPO_DIR/gateway.conf" ]; then
+    info "Применить: sudo gateway/install.sh"
+  else
+    info "Применить: sudo gateway/install.sh -c $CONF"
+  fi
   exit 0
+fi
+
+# Одно подтверждение на всё: файлы шлюза и параметры relay (их план показывает setup-relay.sh).
+relay_args=()
+if [ -n "$PENDING" ] && [ "$ASSUME_YES" != 1 ]; then
+  question="Применить изменения (файлов: $CHANGED)?"
+  if [ "$SKIP_RELAY" != 1 ]; then
+    "$SELF_DIR/setup-relay.sh" -c "$CONF" --dry-run
+    question="Применить изменения (файлов: $CHANGED, и параметры relay выше)?"
+  fi
+  commit_changes "$question"
+  relay_args=(--yes)
+else
+  commit_changes
+fi
+if [ "$ASSUME_YES" = 1 ]; then
+  relay_args=(--yes)
 fi
 
 if [ "$units_changed" = 1 ]; then
@@ -222,12 +276,39 @@ if [ "$haproxy_changed" = 1 ] || [ "$units_changed" = 1 ] || ! systemctl is-acti
 fi
 
 if [ "$SKIP_RELAY" != 1 ]; then
-  "$SELF_DIR/setup-relay.sh" -c "$CONF"
+  "$SELF_DIR/setup-relay.sh" -c "$CONF" ${relay_args[@]+"${relay_args[@]}"}
 fi
 
-log "Готово. Проверки:"
-info "ss -ltnp | grep haproxy          # порты на $GATEWAY_PUBLIC_IPV4"
-info "nft list table inet mail_edge    # счётчики drop/reject"
-info "sudo -u nobody bash -c 'exec 3<>/dev/tcp/$BACKEND_OVERLAY_IP/10025'   # должно быть: Connection refused"
-info "tools/check-tls.sh $MAIL_HOSTNAME   # с адреса из SMTP_ALLOWLIST (для порта 25)"
-info "tools/check-relay.sh $MAIL_HOSTNAME # ожидается Relay access denied"
+# ---------------------------------------------------------------- итог
+log "Итог"
+ok "таблица nftables inet mail_edge загружена"
+if systemctl is-active --quiet haproxy.service; then
+  ok "HAProxy работает: $(svc_summary)"
+else
+  warn "haproxy.service не активен: journalctl -u haproxy -n 50"
+fi
+if [ "$SKIP_RELAY" != 1 ]; then
+  ok "relay Postfix слушает порт $RELAY_PORT (принимает только от $BACKEND_OVERLAY_IP)"
+fi
+info "файлов изменено: $CHANGED"
+if [ "$BACKED_UP" = 1 ]; then
+  info "предыдущие версии: $BACKUP_ROOT/$TS/"
+fi
+if [ "$SMTP_ALLOWLIST_ENABLED" = yes ]; then
+  info "порт 25 открыт только для адресов из smtp-allow.lst (до переключения MX)"
+fi
+
+log "Что проверить дальше"
+info "На шлюзе:"
+info "  sudo ss -ltnp | grep haproxy                 # порты на $GATEWAY_PUBLIC_IPV4"
+info "  sudo nft list table inet mail_edge           # счётчики drop/reject"
+info "  sudo -u nobody bash -c 'exec 3<>/dev/tcp/$BACKEND_OVERLAY_IP/10025'   # ожидается Connection refused"
+if [ "$SMTP_ALLOWLIST_ENABLED" = yes ]; then
+  info "С внешней машины из SMTP_ALLOWLIST (или с самого шлюза):"
+else
+  info "С внешней машины:"
+fi
+info "  tools/check-tls.sh $MAIL_HOSTNAME            # на всех портах OK"
+info "  tools/check-relay.sh $MAIL_HOSTNAME          # OK: relay запрещён"
+info "На бэкенде — реальные адреса клиентов в логах mailcow и отправка через relay:"
+info "  $DOCS_URL/install/#gateway-checks"

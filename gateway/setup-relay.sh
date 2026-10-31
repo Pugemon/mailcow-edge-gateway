@@ -5,8 +5,9 @@
 # Порт 25 шлюза остаётся за HAProxy: стандартный smtpd на 25 выключается.
 # Снаружи RELAY_PORT закрыт таблицей nftables inet mail_edge (gateway/install.sh).
 #
-# Нужен дистрибутив с apt и debconf. Повторный запуск безопасен: postfix перезапускается,
-# только если конфигурация изменилась.
+# Нужен дистрибутив с apt и debconf. Перед изменением показывает план и спрашивает подтверждение
+# (или --yes). Повторный запуск безопасен: postfix перезапускается, только если конфигурация
+# изменилась.
 set -euo pipefail
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -15,21 +16,37 @@ REPO_DIR=$(dirname "$SELF_DIR")
 . "$REPO_DIR/lib/common.sh"
 
 usage() {
-  cat <<EOF
-Использование: gateway/setup-relay.sh [-c FILE] [--dry-run]
+  cat <<'EOF'
+Использование: gateway/setup-relay.sh [-c FILE] [--dry-run] [--yes]
 
+Postfix на шлюзе как relay исходящей почты mailcow: принимает только от бэкенда на RELAY_PORT,
+отправляет с публичного адреса шлюза. Обычно вызывается из gateway/install.sh.
+
+Параметры:
   -c, --config FILE  файл настроек (по умолчанию: gateway.conf в корне репозитория)
   --dry-run          показать, какие параметры Postfix изменятся; ничего не менять
+  -y, --yes          не спрашивать подтверждение
+  -h, --help         эта справка
+  --version          версия
+
+Примеры:
+  sudo gateway/setup-relay.sh --dry-run
+  sudo gateway/setup-relay.sh --yes
+
+Коды возврата: 0 — готово (или нечего менять), 1 — ошибка или отказ от изменений,
+2 — неверные аргументы.
 EOF
 }
 
 CONF=$REPO_DIR/gateway.conf
 while [ $# -gt 0 ]; do
   case $1 in
-    -c|--config) CONF=${2:?не указан файл настроек}; shift 2 ;;
+    -c|--config) [ $# -ge 2 ] || die_usage "не указан файл настроек"; CONF=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    -y|--yes) ASSUME_YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) usage >&2; die "неизвестный аргумент: $1" ;;
+    --version) print_version; exit 0 ;;
+    *) die_usage "неизвестный аргумент: $1" ;;
   esac
 done
 
@@ -52,7 +69,9 @@ case $RELAY_INET_PROTOCOLS in ipv4|all|ipv6|"ipv4, ipv6") ;; *) die "некор�
   die "RELAY_HOSTNAME должен отличаться от MAIL_HOSTNAME (иначе 'loops back to myself')"
 
 # Кэш TLS-сессий: btree, если Postfix его поддерживает (в новых сборках может остаться только lmdb).
+# Значения с $ здесь и в SETTINGS — в одинарных кавычках намеренно: их раскрывает Postfix.
 scache=""
+# shellcheck disable=SC2016
 if have postconf; then
   if postconf -m | grep -qx btree; then
     scache='btree:${data_directory}/smtp_scache'
@@ -64,6 +83,7 @@ else
 fi
 
 # Параметры main.cf. Значения с $ — в одинарных кавычках: Postfix раскрывает их сам.
+# shellcheck disable=SC2016
 SETTINGS=(
   "compatibility_level = 2"
   "myhostname = $RELAY_HOSTNAME"
@@ -111,6 +131,39 @@ postfix_state() {
   postconf -P 2>/dev/null
 }
 
+# relay_plan — показать, какие параметры Postfix изменятся; в PLAN_CHANGES — их число.
+PLAN_CHANGES=0
+relay_plan() {
+  local kv k want cur
+  PLAN_CHANGES=0
+  for kv in "${SETTINGS[@]}"; do
+    k=${kv%% =*}
+    want=${kv#* = }
+    [ "$want" != "$kv" ] || want=""
+    cur=$(postconf -h "$k" 2>/dev/null || true)
+    if [ "$cur" != "$want" ]; then
+      info "$k: '$cur' -> '$want'"
+      PLAN_CHANGES=$((PLAN_CHANGES + 1))
+    fi
+  done
+  if [ -n "$(postconf -M smtp/inet 2>/dev/null)" ]; then
+    info "master.cf: smtp/inet (порт 25) будет закомментирован"
+    PLAN_CHANGES=$((PLAN_CHANGES + 1))
+  fi
+  # Первые 8 полей: опции -o (syslog_name) postconf -M печатает в той же строке.
+  if [ "$(postconf -M "$RELAY_PORT/inet" 2>/dev/null | awk '{ print $1, $2, $3, $4, $5, $6, $7, $8 }')" != "${MASTER_ENTRY#*=}" ]; then
+    info "master.cf: будет добавлено '$MASTER_ENTRY'"
+    PLAN_CHANGES=$((PLAN_CHANGES + 1))
+  fi
+  if [ "$(postconf -hP "${MASTER_SYSLOG%%=*}" 2>/dev/null || true)" != "${MASTER_SYSLOG#*=}" ]; then
+    info "master.cf: $MASTER_SYSLOG"
+    PLAN_CHANGES=$((PLAN_CHANGES + 1))
+  fi
+  if [ "$PLAN_CHANGES" = 0 ]; then
+    info "параметры Postfix уже настроены"
+  fi
+}
+
 log "Postfix relay на порту $RELAY_PORT (от $BACKEND_OVERLAY_IP)"
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -120,21 +173,7 @@ if [ "$DRY_RUN" = 1 ]; then
     info "  master.cf: $MASTER_ENTRY"
     exit 0
   fi
-  for kv in "${SETTINGS[@]}"; do
-    k=${kv%% =*}
-    want=${kv#* = }
-    [ "$want" != "$kv" ] || want=""
-    cur=$(postconf -h "$k" 2>/dev/null || true)
-    if [ "$cur" != "$want" ]; then
-      info "$k: '$cur' -> '$want'"
-    fi
-  done
-  if [ -n "$(postconf -M smtp/inet 2>/dev/null)" ]; then
-    info "master.cf: smtp/inet (порт 25) будет закомментирован"
-  fi
-  if [ "$(postconf -M "$RELAY_PORT/inet" 2>/dev/null | tr -s ' \t' ' ')" != "${MASTER_ENTRY#*=}" ]; then
-    info "master.cf: будет добавлено '$MASTER_ENTRY'"
-  fi
+  relay_plan
   exit 0
 fi
 
@@ -142,14 +181,20 @@ need_root
 
 if ! dpkg -s postfix >/dev/null 2>&1; then
   have apt-get || die "postfix не установлен, а apt-get нет — установите postfix вручную"
+  info "postfix не установлен — будет установлен (apt-get) и настроен как relay"
+  confirm "Установить и настроить postfix?" || cancel
   echo "postfix postfix/main_mailer_type select No configuration" | debconf-set-selections
   DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
-  # До установки postconf не было — кэш TLS-сессий выбираем заново.
-  exec "$0" -c "$CONF"
+  # До установки postconf не было — кэш TLS-сессий выбираем заново. Согласие уже получено.
+  exec "$0" -c "$CONF" --yes
 fi
 [ -f /etc/postfix/master.cf ] || cp /usr/share/postfix/master.cf.dist /etc/postfix/master.cf
 [ -f /etc/postfix/main.cf ] || touch /etc/postfix/main.cf
 
+relay_plan
+if [ "$PLAN_CHANGES" -gt 0 ]; then
+  confirm "Применить параметры Postfix (изменений: $PLAN_CHANGES)?" || cancel "postfix не изменён"
+fi
 before=$(postfix_state)
 
 postconf -e "${SETTINGS[@]}"

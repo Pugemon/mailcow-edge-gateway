@@ -18,15 +18,28 @@ REPO_DIR=$(dirname "$SELF_DIR")
 . "$REPO_DIR/lib/common.sh"
 
 usage() {
-  cat <<EOF
-Использование: backend/issue-cert.sh [-c FILE] (--staging | --production | --install-only) [--force] [--dry-run]
+  cat <<'EOF'
+Использование: backend/issue-cert.sh [-c FILE] (--staging | --production | --install-only)
+                                     [--force] [--dry-run]
 
+Сертификат mailcow через acme.sh и DNS-01: выпуск, установка в mailcow, cron продления.
+
+Параметры:
   -c, --config FILE  файл настроек (по умолчанию: backend.conf в корне репозитория)
-  --staging          тестовый выпуск через letsencrypt_test
+  --staging          тестовый выпуск через letsencrypt_test (в mailcow не устанавливается)
   --production       боевой выпуск и установка в mailcow
   --install-only     установить уже выпущенный сертификат (без выпуска)
   --force            перевыпустить боевой сертификат, даже если он уже есть и не истекает
   --dry-run          показать команды acme.sh, ничего не выполняя
+  -h, --help         эта справка
+  --version          версия
+
+Примеры:
+  sudo backend/issue-cert.sh --staging       # проверить DNS API, CAA и пропагацию
+  sudo backend/issue-cert.sh --production    # боевой выпуск, установка, cron
+  backend/issue-cert.sh -c examples/backend.conf --production --dry-run
+
+Коды возврата: 0 — готово, 1 — ошибка, 2 — неверные аргументы.
 EOF
 }
 
@@ -35,17 +48,18 @@ MODE=""
 FORCE=0
 while [ $# -gt 0 ]; do
   case $1 in
-    -c|--config) CONF=${2:?не указан файл настроек}; shift 2 ;;
+    -c|--config) [ $# -ge 2 ] || die_usage "не указан файл настроек"; CONF=$2; shift 2 ;;
     --staging) MODE=staging; shift ;;
     --production) MODE=production; shift ;;
     --install-only) MODE=install; shift ;;
     --force) FORCE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) usage >&2; die "неизвестный аргумент: $1" ;;
+    --version) print_version; exit 0 ;;
+    *) die_usage "неизвестный аргумент: $1" ;;
   esac
 done
-[ -n "$MODE" ] || { usage >&2; die "укажите --staging, --production или --install-only"; }
+[ -n "$MODE" ] || die_usage "укажите --staging, --production или --install-only"
 
 load_conf "$CONF"
 require_vars MAILCOW_DIR MAIL_HOSTNAME ACME_DNS_API

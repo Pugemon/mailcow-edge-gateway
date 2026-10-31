@@ -9,7 +9,8 @@
 #   - /etc/docker/daemon.json: "userland-proxy": false;
 #   - хук перезагрузки сертификата для acme.sh: /usr/local/sbin/mailcow-cert-reload.sh.
 #
-# Docker и контейнеры mailcow скрипт НЕ перезапускает — это отдельный шаг (см. README).
+# Сначала показывается diff всех изменений, файлы меняются только после подтверждения (или --yes).
+# Docker и контейнеры mailcow скрипт НЕ перезапускает — это отдельный шаг (печатается в конце).
 # Повторный запуск с теми же настройками ничего не меняет. Предыдущие версии файлов —
 # в /var/backups/mailcow-edge-gateway/.
 set -euo pipefail
@@ -20,12 +21,29 @@ REPO_DIR=$(dirname "$SELF_DIR")
 . "$REPO_DIR/lib/common.sh"
 
 usage() {
-  cat <<EOF
-Использование: backend/install.sh [-c FILE] [--dry-run] [--render DIR]
+  cat <<'EOF'
+Использование: backend/install.sh [-c FILE] [--dry-run | --render DIR] [--yes]
 
+Подготовка сервера mailcow к работе за шлюзом: таблица nftables inet mailcow_edge, sysctl,
+mailcow.conf и docker-compose.override.yml (haproxy-listeners), Dovecot, nginx, relayhost,
+userland-proxy Docker, хук сертификата. Показывает diff и спрашивает подтверждение.
+Docker и контейнеры mailcow не перезапускает — команды для этого печатает в конце.
+
+Параметры:
   -c, --config FILE  файл настроек (по умолчанию: backend.conf в корне репозитория)
   --dry-run          показать diff всех изменений; ничего не менять
   --render DIR       только записать системные файлы (nftables, systemd, sysctl, хук) в DIR
+  -y, --yes          не спрашивать подтверждение (для автоматизации)
+  -h, --help         эта справка
+  --version          версия
+
+Примеры:
+  backend/install.sh -c examples/backend.conf --render /tmp/be   # посмотреть файлы без root
+  sudo backend/install.sh --dry-run                              # план изменений на бэкенде
+  sudo backend/install.sh                                        # установка с подтверждением
+
+Коды возврата: 0 — готово (или нечего менять), 1 — ошибка или отказ от изменений,
+2 — неверные аргументы.
 EOF
 }
 
@@ -33,11 +51,13 @@ CONF=$REPO_DIR/backend.conf
 RENDER_DIR=""
 while [ $# -gt 0 ]; do
   case $1 in
-    -c|--config) CONF=${2:?не указан файл настроек}; shift 2 ;;
+    -c|--config) [ $# -ge 2 ] || die_usage "не указан файл настроек"; CONF=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    --render) RENDER_DIR=${2:?не указан каталог}; shift 2 ;;
+    --render) [ $# -ge 2 ] || die_usage "не указан каталог для --render"; RENDER_DIR=$2; shift 2 ;;
+    -y|--yes) ASSUME_YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) usage >&2; die "неизвестный аргумент: $1" ;;
+    --version) print_version; exit 0 ;;
+    *) die_usage "неизвестный аргумент: $1" ;;
   esac
 done
 
@@ -84,7 +104,7 @@ chmod 755 "$OUT/usr/local/sbin/mailcow-cert-reload.sh"
 
 if [ -n "$RENDER_DIR" ]; then
   log "Файлы записаны в $RENDER_DIR"
-  (cd "$RENDER_DIR" && find . -type f | sed 's#^\.#    #')
+  (cd "$RENDER_DIR" && find . -type f | sort | sed 's#^\.#    #')
   exit 0
 fi
 
@@ -257,8 +277,15 @@ fi
 # ---------------------------------------------------------------- применение
 if [ "$DRY_RUN" = 1 ]; then
   log "dry-run: ничего не изменено (файлов к изменению: $CHANGED)"
+  if [ "$CONF" = "$REPO_DIR/backend.conf" ]; then
+    info "Применить: sudo backend/install.sh"
+  else
+    info "Применить: sudo backend/install.sh -c $CONF"
+  fi
   exit 0
 fi
+
+commit_changes
 
 if [ "$sysctl_changed" = 1 ]; then
   sysctl -q -p /etc/sysctl.d/90-mailcow-nonlocal-bind.conf
@@ -273,22 +300,35 @@ if [ "$nft_changed" = 1 ] || ! systemctl is-active --quiet mailcow-edge.service;
 fi
 nft list table inet mailcow_edge >/dev/null || die "таблица inet mailcow_edge не загружена"
 
-log "Дальше (вручную)"
+# ---------------------------------------------------------------- итог
+log "Итог"
+ok "таблица nftables inet mailcow_edge загружена (PROXY-порты — только с $GATEWAY_OVERLAY_IP)"
+info "файлов изменено: $CHANGED"
+if [ "$BACKED_UP" = 1 ]; then
+  info "предыдущие версии: $BACKUP_ROOT/$TS/"
+fi
+
+log "Что сделать дальше (вручную)"
 step=1
 if [ "$docker_changed" = 1 ]; then
-  info "$step. systemctl restart docker      # применить userland-proxy=false (перезапустит все контейнеры)"
+  info "$step. sudo systemctl restart docker      # применить userland-proxy=false (перезапустит все контейнеры)"
   step=$((step + 1))
 fi
 if [ "$compose_changed" = 1 ] || [ "$docker_changed" = 1 ]; then
-  info "$step. cd $MC && docker compose up -d   # опубликовать PROXY-порты на $BACKEND_OVERLAY_IP"
+  info "$step. cd $MC && sudo docker compose up -d   # опубликовать PROXY-порты на $BACKEND_OVERLAY_IP"
   step=$((step + 1))
 elif [ "$restart_needed" = 1 ]; then
-  info "$step. cd $MC && docker compose restart postfix-mailcow dovecot-mailcow nginx-mailcow"
+  info "$step. cd $MC && sudo docker compose restart postfix-mailcow dovecot-mailcow nginx-mailcow"
   step=$((step + 1))
 fi
-info "$step. Whitelist Fail2ban mailcow: добавьте $GATEWAY_OVERLAY_IP/32 (README, шаг 1)"
+info "$step. Fail2ban mailcow: добавьте $GATEWAY_OVERLAY_IP/32 в whitelist (интерфейс администратора)"
 step=$((step + 1))
-info "$step. Сертификат: backend/issue-cert.sh --staging, затем --production (docs/certificate.md)"
-info ""
-info "Проверка публикации портов после 'docker compose up -d':"
-info "  cd $MC && docker compose config | grep -A3 'host_ip: $BACKEND_OVERLAY_IP' | grep -E 'published|target'"
+info "$step. Сертификат: sudo backend/issue-cert.sh --staging, затем --production"
+
+log "Что проверить дальше"
+info "sysctl net.ipv4.ip_nonlocal_bind                       # = 1"
+info "pgrep -a docker-proxy || echo 'docker-proxy нет'       # после рестарта Docker"
+info "cd $MC && sudo docker compose ps postfix-mailcow dovecot-mailcow   # $BACKEND_OVERLAY_IP:10025->10025/tcp ..."
+info "cd $MC && sudo docker compose exec postfix-mailcow postconf relayhost"
+info "nc -zv -w5 $BACKEND_OVERLAY_IP 10025   # с другого узла оверлея: ожидается таймаут"
+info "Подробно: $DOCS_URL/install/#backend-checks"

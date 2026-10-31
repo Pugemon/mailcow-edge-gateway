@@ -3,6 +3,8 @@
 # mailcow (--reloadcmd). Перечитывает сертификат в Postfix, Dovecot и nginx; если reload не
 # удался — перезапускает эти контейнеры.
 cd "{{MAILCOW_DIR}}" || exit 1
+# Если не удался любой из reload — перезапуск всех трёх (A && B && C || D — намеренно).
+# shellcheck disable=SC2015
 docker compose exec -T postfix-mailcow postfix reload &&
   docker compose exec -T dovecot-mailcow doveadm reload &&
   docker compose exec -T nginx-mailcow nginx -s reload ||
