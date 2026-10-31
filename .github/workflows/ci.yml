@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Linux — как на серверах; macOS — bash 3.2: --render и --dry-run должны работать на рабочей машине.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make lint          # shellcheck уже есть в образе ubuntu-latest
+
+  configs:
+    name: haproxy -c / nft -c
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Установить haproxy и nftables
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends haproxy nftables
+          haproxy -v | head -n1
+          nft --version
+      - name: Отрендерить примеры и проверить синтаксис
+        run: sudo env STRICT=1 bash tests/validate-configs.sh

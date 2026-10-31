@@ -17,3 +17,11 @@ account.conf
 *.swp
 *~
 .DS_Store
+
+# Сборка документации и сгенерированный справочник команд (make docs)
+/site/
+/docs/commands.md
+
+# Python
+__pycache__/
+*.pyc

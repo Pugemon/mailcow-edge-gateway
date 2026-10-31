@@ -1,0 +1,3 @@
+# Подключаемые файлы (. "$REPO_DIR/lib/common.sh") ищутся относительно каталога скрипта.
+source-path=SCRIPTDIR
+external-sources=true
